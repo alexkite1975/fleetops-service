@@ -26,7 +26,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: '1.25'
 
       - name: Run Tests & Vet
         run: |
@@ -47,7 +47,7 @@ jobs:
       - name: Build Container with Cloud Build
         run: |
           IMAGE_TAG="gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-          gcloud builds submit --tag "${IMAGE_TAG}" .
+          gcloud builds submit --project="${{ env.PROJECT_ID }}" --tag "${IMAGE_TAG}" .
 
       - name: Deploy Revision to Cloud Run
         run: |
@@ -56,4 +56,4 @@ jobs:
             --image "${IMAGE_TAG}" \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT_ID }} \
-            --quiet\n
+            --quiet
