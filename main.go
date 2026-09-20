@@ -134,7 +134,10 @@ func main() {
 	}
 
 	var err error
-	dbConnStr := os.Getenv("DATABASE_URL")
+	dbConnStr := os.Getenv("DB_URL")
+	if dbConnStr == "" {
+		dbConnStr = os.Getenv("DATABASE_URL")
+	}
 	if dbConnStr != "" {
 		db, err = sql.Open("postgres", dbConnStr)
 		if err != nil {
