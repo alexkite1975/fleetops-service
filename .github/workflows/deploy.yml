@@ -32,6 +32,7 @@ jobs:
         run: |
           go mod tidy
           go vet main.go
+          go test -v ./...
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v2
