@@ -31,7 +31,7 @@ jobs:
       - name: Run Tests & Vet
         run: |
           go mod tidy
-          go vet main.go
+          go vet ./...
           go test -v ./...
 
       - name: Authenticate to Google Cloud via WIF
