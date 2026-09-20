@@ -2,52 +2,54 @@ package main
 
 import (
 	"context"
-	"time"
-	"database/sql"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"math"
+	"log"
 	"net/http"
+	"time"
 )
 
 type ReserveSlotRequest struct {
-	LaybyID      string `json:"layby_id"`
-	VehicleReg   string `json:"vehicle_reg"`
-	VehicleType  string `json:"vehicle_type"`
-	DurationMins int    `json:"duration_minutes"`
+	LaybyID         string `json:"layby_id"`
+	VehicleReg      string `json:"vehicle_reg"`
+	VehicleType     string `json:"vehicle_type"`
+	DurationMinutes int    `json:"duration_minutes"`
 }
 
-type ReserveSlotResponse struct {
-	ReservationID string  `json:"reservation_id"`
-	LaybyID       string  `json:"layby_id"`
-	VehicleReg    string  `json:"vehicle_reg"`
-	StartMeter    float64 `json:"start_meter"`
-	EndMeter      float64 `json:"end_meter"`
-	LengthMeters  float64 `json:"length_meters"`
-	ExpiresAt     string  `json:"expires_at"`
-	Status        string  `json:"status"`
+type ReservationResponse struct {
+	ReservationID string    `json:"reservation_id"`
+	LaybyID       string    `json:"layby_id"`
+	VehicleReg    string    `json:"vehicle_reg"`
+	StartMeter    float64   `json:"start_meter"`
+	EndMeter      float64   `json:"end_meter"`
+	LengthMeters  float64   `json:"length_meters"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	Status        string    `json:"status"`
 }
 
-func initReservationTable(ctx context.Context) error {
+func initReservationTable(ctx context.Context) {
 	if db == nil {
-		return nil
+		return
 	}
-	query := `
+	schema := `
 	CREATE TABLE IF NOT EXISTS layby_reservations (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		layby_id UUID NOT NULL REFERENCES layby_corridors(id) ON DELETE CASCADE,
+		id UUID PRIMARY KEY,
+		layby_id UUID NOT NULL,
 		vehicle_reg VARCHAR(32) NOT NULL,
-		start_meter NUMERIC(6, 2) NOT NULL,
-		end_meter NUMERIC(6, 2) NOT NULL,
-		reserved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '15 minutes'),
-		status VARCHAR(32) NOT NULL DEFAULT 'HELD',
-		CONSTRAINT check_reservation_meters CHECK (end_meter > start_meter)
+		start_meter NUMERIC(6,2) NOT NULL,
+		end_meter NUMERIC(6,2) NOT NULL,
+		length_meters NUMERIC(6,2) NOT NULL,
+		status VARCHAR(16) NOT NULL DEFAULT 'HELD',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at TIMESTAMPTZ NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_layby_res_active ON layby_reservations(layby_id, expires_at) WHERE status = 'HELD';
+	CREATE INDEX IF NOT EXISTS idx_layby_res_active 
+	ON layby_reservations (layby_id, status, expires_at);
 	`
-	_, err := db.ExecContext(ctx, query)
-	return err
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		log.Printf("Warning: Failed to ensure layby_reservations schema: %v", err)
+	}
 }
 
 func handleReserveSlot(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +60,7 @@ func handleReserveSlot(w http.ResponseWriter, r *http.Request) {
 
 	var req ReserveSlotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request payload"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"Invalid request payload"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -67,30 +69,27 @@ func handleReserveSlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requiredLength := 18.5
-	if req.VehicleType == "RIGID" {
-		requiredLength = 14.0
+	duration := req.DurationMinutes
+	if duration <= 0 || duration > 60 {
+		duration = 15
 	}
-	if req.DurationMins <= 0 || req.DurationMins > 60 {
-		req.DurationMins = 15
+
+	neededLength := 18.5
+	if req.VehicleType == "RIGID" {
+		neededLength = 14.0
+	}
+
+	if db == nil {
+		http.Error(w, `{"error":"Database unavailable"}`, http.StatusServiceUnavailable)
+		return
 	}
 
 	tx, err := db.BeginTx(r.Context(), nil)
 	if err != nil {
-		http.Error(w, `{"error":"failed to start transaction"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"Failed to initiate transaction"}`, http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback()
-
-	var totalLength float64
-	err = tx.QueryRowContext(r.Context(), "SELECT total_length_meters FROM layby_corridors WHERE id = $1::uuid FOR UPDATE;", req.LaybyID).Scan(&totalLength)
-	if err == sql.ErrNoRows {
-		http.Error(w, `{"error":"layby corridor not found"}`, http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"db error: %v"}`, err), http.StatusInternalServerError)
-		return
-	}
 
 	query := `
 		SELECT COALESCE(vehicle_reg, 'UNKNOWN'), start_meter, end_meter
@@ -103,76 +102,72 @@ func handleReserveSlot(w http.ResponseWriter, r *http.Request) {
 	`
 	rows, err := tx.QueryContext(r.Context(), query, req.LaybyID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"query error: %v"}`, err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error":"Query failed: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
 	var occupied []OccupiedInterval
 	for rows.Next() {
 		var o OccupiedInterval
 		if err := rows.Scan(&o.VehicleReg, &o.StartMeters, &o.EndMeters); err == nil {
-			if o.StartMeters > o.EndMeters {
-				o.StartMeters, o.EndMeters = o.EndMeters, o.StartMeters
-			}
 			occupied = append(occupied, o)
 		}
 	}
+	rows.Close()
 
-	slots := calculateLaybySlots(totalLength, occupied, 2.0)
-	var chosenSlot *AvailableSlot
-	for _, s := range slots {
-		if s.LengthMeters >= requiredLength {
-			slotCopy := s
-			chosenSlot = &slotCopy
+	totalLength := 120.0
+	safetyBuffer := 2.0
+	availableSlots := calculateLaybySlots(totalLength, occupied, safetyBuffer)
+
+	var chosenSlot *LaybySlot
+	for i := range availableSlots {
+		if availableSlots[i].LengthMeters >= neededLength {
+			chosenSlot = &availableSlots[i]
 			break
 		}
 	}
 
 	if chosenSlot == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		w.Write([]byte(`{"error":"NO_SLOT_AVAILABLE","message":"No available slot large enough for requested vehicle"}`))
+		http.Error(w, `{"error":"NO_SUITABLE_SLOT_AVAILABLE"}`, http.StatusConflict)
 		return
 	}
 
-	startMeter := chosenSlot.StartMeters
-	endMeter := math.Round((startMeter+requiredLength)*10) / 10
+	allocStart := chosenSlot.StartMeters
+	allocEnd := allocStart + neededLength
+	resUUID := newUUID()
+	expiresAt := time.Now().UTC().Add(time.Duration(duration) * time.Minute)
 
-	var reservationID string
-	var expiresAt string
-	insertQuery := `
-		INSERT INTO layby_reservations (layby_id, vehicle_reg, start_meter, end_meter, expires_at)
-		VALUES ($1::uuid, $2, $3, $4, NOW() + ($5 || ' minutes')::interval)
-		RETURNING id, to_char(expires_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+	insertSQL := `
+		INSERT INTO layby_reservations (id, layby_id, vehicle_reg, start_meter, end_meter, length_meters, status, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, 'HELD', $7);
 	`
-	err = tx.QueryRowContext(r.Context(), insertQuery, req.LaybyID, req.VehicleReg, startMeter, endMeter, req.DurationMins).Scan(&reservationID, &expiresAt)
+	_, err = tx.ExecContext(r.Context(), insertSQL, resUUID, req.LaybyID, req.VehicleReg, allocStart, allocEnd, neededLength, expiresAt)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"insert reservation error: %v"}`, err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error":"Insert failed: %v"}`, err), http.StatusInternalServerError)
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		http.Error(w, `{"error":"commit failed"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"Commit failed"}`, http.StatusInternalServerError)
 		return
+	}
+
+	resp := ReservationResponse{
+		ReservationID: resUUID,
+		LaybyID:       req.LaybyID,
+		VehicleReg:    req.VehicleReg,
+		StartMeter:    allocStart,
+		EndMeter:      allocEnd,
+		LengthMeters:  neededLength,
+		ExpiresAt:     expiresAt,
+		Status:        "HELD",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(ReserveSlotResponse{
-		ReservationID: reservationID,
-		LaybyID:       req.LaybyID,
-		VehicleReg:    req.VehicleReg,
-		StartMeter:    startMeter,
-		EndMeter:      endMeter,
-		LengthMeters:  requiredLength,
-		ExpiresAt:     expiresAt,
-		Status:        "HELD",
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
-
-// sweepExpiredReservations transitions expired HELD reservations to EXPIRED
 func sweepExpiredReservations(ctx context.Context) (int64, error) {
 	if db == nil {
 		return 0, nil
@@ -189,7 +184,6 @@ func sweepExpiredReservations(ctx context.Context) (int64, error) {
 	return res.RowsAffected()
 }
 
-// handleSweepReservations allows an external trigger (like Cloud Scheduler) to trigger the sweep
 func handleSweepReservations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -207,7 +201,6 @@ func handleSweepReservations(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","expired_count":%d}`, rows)
 }
 
-// startReservationSweeper runs an in-process ticker every interval while the container is warm
 func startReservationSweeper(ctx context.Context, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -221,4 +214,12 @@ func startReservationSweeper(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}()
+}
+
+func newUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
