@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -168,4 +169,56 @@ func handleReserveSlot(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     expiresAt,
 		Status:        "HELD",
 	})
+}
+
+
+// sweepExpiredReservations transitions expired HELD reservations to EXPIRED
+func sweepExpiredReservations(ctx context.Context) (int64, error) {
+	if db == nil {
+		return 0, nil
+	}
+	query := `
+		UPDATE layby_reservations
+		SET status = 'EXPIRED'
+		WHERE status = 'HELD' AND expires_at <= NOW();
+	`
+	res, err := db.ExecContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// handleSweepReservations allows an external trigger (like Cloud Scheduler) to trigger the sweep
+func handleSweepReservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := sweepExpiredReservations(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"sweeper failed: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"status":"ok","expired_count":%d}`, rows)
+}
+
+// startReservationSweeper runs an in-process ticker every interval while the container is warm
+func startReservationSweeper(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepExpiredReservations(context.Background())
+			}
+		}
+	}()
 }
