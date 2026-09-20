@@ -1,0 +1,41 @@
+{
+  "displayName": "FleetOps - Twilio SMS Escalation Failure Alert",
+  "documentation": {
+    "content": "CRITICAL: A RED_VOR vehicle defect could not trigger an emergency Twilio SMS alert. Check Cloud Run logs for service 'fleetops-api' and verify Twilio account balance, authentication tokens, and destination phone number formatting.",
+    "mimeType": "text/markdown"
+  },
+  "userLabels": {
+    "severity": "critical",
+    "service": "fleetops-api",
+    "component": "sms-dispatcher"
+  },
+  "conditions": [
+    {
+      "displayName": "Twilio Escalation Failure Count > 0",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_run_revision\" AND metric.type = \"logging.googleapis.com/user/twilio_escalation_failures\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_DELTA",
+            "crossSeriesReducer": "REDUCE_SUM"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "86400s"
+  },
+  "combiner": "OR",
+  "enabled": true,
+  "notificationChannels": [
+    "projects/drive-partners2/notificationChannels/1415069064516173255"
+  ]
+}
