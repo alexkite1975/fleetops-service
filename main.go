@@ -18,4 +18,148 @@ func handleDVLACheck(w http.ResponseWriter, r *http.Request) { if r.Method != ht
 func handleExpenseScan(w http.ResponseWriter, r *http.Request) { if r.Method != http.MethodPost { http.Error(w, `{"error":"POST required"}`, 405); return }; var req ExpenseReq; if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, `{"error":"invalid JSON"}`, 400); return }; q := "INSERT INTO driver_expenses (driver_id, category, vendor, gross_amount, vat_amount, volume_litres, receipt_url, ocr_confidence, expense_date) VALUES ($1, $2::expense_category, $3, $4, $5, $6, $7, $8, NOW()) RETURNING id;"; var id string; err := db.QueryRowContext(r.Context(), q, req.DriverID, req.Category, req.Vendor, req.GrossAmount, req.VatAmount, req.VolumeLitres, req.ReceiptURL, req.OCRConfidence).Scan(&id); if err != nil { http.Error(w, fmt.Sprintf(`{"error":"db insert error: %v"}`, err), 500); return }; w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(map[string]interface{}{"expense_id": id, "gross_amount": req.GrossAmount, "vat_amount": req.VatAmount, "status": "LOGGED_FOR_HMRC"}) }
 func handleSecurityPanic(w http.ResponseWriter, r *http.Request) { if r.Method != http.MethodPost { http.Error(w, `{"error":"POST required"}`, 405); return }; var req PanicReq; if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, `{"error":"invalid JSON"}`, 400); return }; q := "INSERT INTO security_alert_pings (driver_id, alert_type, location, w3w_address, is_active) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326)::geography, $5, true) RETURNING id;"; var id string; err := db.QueryRowContext(r.Context(), q, req.DriverID, req.AlertType, req.Longitude, req.Latitude, req.W3W).Scan(&id); if err != nil { http.Error(w, fmt.Sprintf(`{"error":"db insert error: %v"}`, err), 500); return }; w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(map[string]interface{}{"alert_id": id, "broadcast_radius_meters": 1500, "status": "NEIGHBOR_CABS_NOTIFIED"}) }
 func handleAxleCheck(w http.ResponseWriter, r *http.Request) { if r.Method != http.MethodPost { http.Error(w, `{"error":"POST required"}`, 405); return }; var req AxleCheckReq; if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, `{"error":"invalid JSON"}`, 400); return }; bogieLoad := req.PayloadKg * (req.PayloadCoGFromKingpinMeters / req.TrailerWheelbaseMeters); pinDownforce := req.PayloadKg - bogieLoad; slideFactor := 0.85 - (req.FifthWheelSlideOffsetMeters * 0.15); driveAxleKg := math.Round(7500.0 + (pinDownforce * slideFactor)); bogieKg := math.Round(req.TrailerTareKg + bogieLoad); isOverDrive := driveAxleKg > 11500.0; isOverBogie := bogieKg > 24000.0; rec := "Statutory axle weight within legal limits."; if isOverDrive { rec = fmt.Sprintf("CRITICAL OVERLOAD: Drive axle exceeds legal limit by %.0f kg. Slide fifth-wheel forward or redistribute load.", driveAxleKg-11500.0) } else if isOverBogie { rec = fmt.Sprintf("CRITICAL OVERLOAD: Trailer tri-axle exceeds 24,000 kg by %.0f kg. Move cargo forward.", bogieKg-24000.0) }; w.Header().Set("Content-Type", "application/json"); json.NewEncoder(w).Encode(map[string]interface{}{"drive_axle_kg": driveAxleKg, "bogie_kg": bogieKg, "drive_axle_overloaded": isOverDrive, "bogie_overloaded": isOverBogie, "recommendation": rec}) }
-func main() { initDB(); http.HandleFunc("/healthz", handleHealth); http.HandleFunc("/v1/defects", handleDefects); http.HandleFunc("/v1/radar/low-bridges", handleLowBridgeRadar); http.HandleFunc("/v1/cargomatch/backhauls", handleBackhaulSearch); http.HandleFunc("/v1/compliance/dvla-check", handleDVLACheck); http.HandleFunc("/v1/expenses/scan", handleExpenseScan); http.HandleFunc("/v1/security/panic", handleSecurityPanic); http.HandleFunc("/v1/vehicle/axle-check", handleAxleCheck); port := os.Getenv("PORT"); if port == "" { port = "8080" }; fmt.Printf("Listening on :%s\n", port); if err := http.ListenAndServe(":"+port, nil); err != nil { log.Fatalf("Server error: %v", err) } }
+func main() { initDB(); http.HandleFunc("/healthz", handleHealth); http.HandleFunc("/v1/defects", handleDefects); http.HandleFunc("/v1/radar/low-bridges", handleLowBridgeRadar); http.HandleFunc("/v1/cargomatch/backhauls", handleBackhaulSearch); http.HandleFunc("/v1/compliance/dvla-check", handleDVLACheck); http.HandleFunc("/v1/expenses/scan", handleExpenseScan); http.HandleFunc("/v1/security/panic", handleSecurityPanic); http.HandleFunc("/v1/vehicle/axle-check", handleAxleCheck)
+	http.HandleFunc("/v1/parking/layby-slots", handleLaybySlots); port := os.Getenv("PORT"); if port == "" { port = "8080" }; fmt.Printf("Listening on :%s\n", port); if err := http.ListenAndServe(":"+port, nil); err != nil { log.Fatalf("Server error: %v", err) } }
+
+// Layby Models
+type OccupiedInterval struct {
+	StartMeters float64 `json:"start_meters"`
+	EndMeters   float64 `json:"end_meters"`
+	VehicleReg  string  `json:"vehicle_reg"`
+}
+
+type AvailableSlot struct {
+	SlotNumber   int     `json:"slot_number"`
+	StartMeters  float64 `json:"start_meters"`
+	EndMeters    float64 `json:"end_meters"`
+	LengthMeters float64 `json:"length_meters"`
+	FitsArtic    bool    `json:"fits_standard_artic_16_5m"`
+	FitsRigid    bool    `json:"fits_rigid_12m"`
+}
+
+type LaybySlotResponse struct {
+	LaybyID            string          `json:"layby_id"`
+	Name               string          `json:"name"`
+	TotalLengthMeters  float64         `json:"total_length_meters"`
+	SafetyBufferMeters float64         `json:"safety_buffer_meters"`
+	OccupiedSpaces     int             `json:"occupied_vehicle_count"`
+	AvailableSlots     []AvailableSlot `json:"available_slots"`
+	CapacityStatus     string          `json:"capacity_status"`
+}
+
+func calculateLaybySlots(totalLength float64, occupied []OccupiedInterval, bufferMeters float64) []AvailableSlot {
+	for i := 0; i < len(occupied); i++ {
+		for j := i + 1; j < len(occupied); j++ {
+			if occupied[i].StartMeters > occupied[j].StartMeters {
+				occupied[i], occupied[j] = occupied[j], occupied[i]
+			}
+		}
+	}
+	var merged []OccupiedInterval
+	for _, occ := range occupied {
+		bStart := math.Max(0, occ.StartMeters-bufferMeters/2.0)
+		bEnd := math.Min(totalLength, occ.EndMeters+bufferMeters/2.0)
+		if len(merged) == 0 {
+			merged = append(merged, OccupiedInterval{StartMeters: bStart, EndMeters: bEnd})
+			continue
+		}
+		last := &merged[len(merged)-1]
+		if bStart <= last.EndMeters {
+			if bEnd > last.EndMeters {
+				last.EndMeters = bEnd
+			}
+		} else {
+			merged = append(merged, OccupiedInterval{StartMeters: bStart, EndMeters: bEnd})
+		}
+	}
+	var slots []AvailableSlot
+	cursor := 0.0
+	slotIdx := 1
+	for _, block := range merged {
+		gap := block.StartMeters - cursor
+		if gap >= 12.0 {
+			slots = append(slots, AvailableSlot{
+				SlotNumber:   slotIdx,
+				StartMeters:  math.Round(cursor*10) / 10,
+				EndMeters:    math.Round(block.StartMeters*10) / 10,
+				LengthMeters: math.Round(gap*10) / 10,
+				FitsArtic:    gap >= 18.5,
+				FitsRigid:    gap >= 14.0,
+			})
+			slotIdx++
+		}
+		cursor = block.EndMeters
+	}
+	if totalLength-cursor >= 12.0 {
+		gap := totalLength - cursor
+		slots = append(slots, AvailableSlot{
+			SlotNumber:   slotIdx,
+			StartMeters:  math.Round(cursor*10) / 10,
+			EndMeters:    math.Round(totalLength*10) / 10,
+			LengthMeters: math.Round(gap*10) / 10,
+			FitsArtic:    gap >= 18.5,
+			FitsRigid:    gap >= 14.0,
+		})
+	}
+	return slots
+}
+
+func handleLaybySlots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"Method not allowed"}`, 405)
+		return
+	}
+	laybyID := r.URL.Query().Get("corridor_id")
+	if laybyID == "" {
+		laybyID = r.URL.Query().Get("layby_id")
+	}
+	if laybyID == "" {
+		http.Error(w, `{"error":"missing corridor_id or layby_id"}`, 400)
+		return
+	}
+	var name string
+	var totalLength float64
+	err := db.QueryRowContext(r.Context(), "SELECT name, total_length_meters FROM layby_corridors WHERE id = $1::uuid;", laybyID).Scan(&name, &totalLength)
+	if err == sql.ErrNoRows {
+		http.Error(w, `{"error":"corridor not found"}`, 404)
+		return
+	} else if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"db error: %v"}`, err), 500)
+		return
+	}
+	rows, err := db.QueryContext(r.Context(), "SELECT COALESCE(vehicle_reg, 'UNKNOWN'), start_meter, end_meter FROM layby_occupancy_segments WHERE layby_id = $1::uuid AND is_confirmed_parked = true;", laybyID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"query error: %v"}`, err), 500)
+		return
+	}
+	defer rows.Close()
+	var occupied []OccupiedInterval
+	for rows.Next() {
+		var o OccupiedInterval
+		if err := rows.Scan(&o.VehicleReg, &o.StartMeters, &o.EndMeters); err == nil {
+			if o.StartMeters > o.EndMeters {
+				o.StartMeters, o.EndMeters = o.EndMeters, o.StartMeters
+			}
+			occupied = append(occupied, o)
+		}
+	}
+	bufferMeters := 2.0
+	slots := calculateLaybySlots(totalLength, occupied, bufferMeters)
+	if slots == nil {
+		slots = []AvailableSlot{}
+	}
+	status := "FULL"
+	if len(slots) > 0 {
+		status = "SPACES_AVAILABLE"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(LaybySlotResponse{
+		LaybyID:            laybyID,
+		Name:               name,
+		TotalLengthMeters:  totalLength,
+		SafetyBufferMeters: bufferMeters,
+		OccupiedSpaces:     len(occupied),
+		AvailableSlots:     slots,
+		CapacityStatus:     status,
+	})
+}
