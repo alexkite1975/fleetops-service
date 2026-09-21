@@ -152,6 +152,7 @@ func main() {
 	mux.HandleFunc("/v1/parking/dispatcher/overview", HandleDispatcherOverview(db))"/v1/parking/layby-slots", handleLaybySlots)
 	http.HandleFunc("/v1/parking/reserve-slot", handleReserveSlot)
 	http.HandleFunc("/v1/parking/expire-sweeper", handleSweepReservations)
+	http.HandleFunc("/v1/parking/dispatcher/overview", HandleDispatcherOverview(db))
 
 	log.Printf("Server listening on port %s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
