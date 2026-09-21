@@ -148,7 +148,8 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/v1/parking/layby-slots", handleLaybySlots)
+	http.HandleFunc(
+	mux.HandleFunc("/v1/parking/dispatcher/overview", HandleDispatcherOverview(db))"/v1/parking/layby-slots", handleLaybySlots)
 	http.HandleFunc("/v1/parking/reserve-slot", handleReserveSlot)
 	http.HandleFunc("/v1/parking/expire-sweeper", handleSweepReservations)
 
